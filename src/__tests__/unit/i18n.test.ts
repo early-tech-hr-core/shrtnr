@@ -1,0 +1,231 @@
+import { describe, expect, it } from "vitest";
+import {
+  createTranslateFn,
+  documentLang,
+  getTranslations,
+  isSupportedLanguage,
+  DEFAULT_LANGUAGE,
+  SUPPORTED_LANGUAGES,
+} from "../../i18n";
+import en from "../../i18n/en";
+
+function flattenKeys(obj: unknown, prefix = ""): string[] {
+  if (obj === null || typeof obj !== "object") return [prefix];
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(obj)) {
+    const next = prefix ? `${prefix}.${k}` : k;
+    out.push(...flattenKeys(v, next));
+  }
+  return out;
+}
+
+/** The `{name}` placeholders a translated string interpolates. */
+function placeholders(value: string): string[] {
+  return [...(value.match(/\{[a-zA-Z0-9_]+\}/g) ?? [])].sort();
+}
+
+/**
+ * Every supported language except the fallback. Derived once here: the
+ * placeholder and key-parity suites both iterate it, so a change to the
+ * default language or to the exclusion rule lands in one place instead of
+ * two copies that drift apart.
+ */
+const translated = SUPPORTED_LANGUAGES.filter((lang) => lang !== DEFAULT_LANGUAGE);
+
+describe("i18n", () => {
+  describe("isSupportedLanguage", () => {
+    it("returns true for supported languages", () => {
+      expect(isSupportedLanguage("en")).toBe(true);
+      expect(isSupportedLanguage("id")).toBe(true);
+      expect(isSupportedLanguage("sv")).toBe(true);
+      expect(isSupportedLanguage("zh")).toBe(true);
+    });
+
+    it("returns false for unsupported languages", () => {
+      expect(isSupportedLanguage("fr")).toBe(false);
+      expect(isSupportedLanguage("")).toBe(false);
+      expect(isSupportedLanguage("EN")).toBe(false);
+    });
+  });
+
+  describe("getTranslations", () => {
+    it("returns English translations for 'en'", () => {
+      const t = getTranslations("en");
+      expect(t["nav.dashboard"]).toBe("Dashboard");
+    });
+
+    it("returns Indonesian translations for 'id'", () => {
+      const t = getTranslations("id");
+      expect(t["nav.dashboard"]).toBe("Dasbor");
+    });
+
+    it("returns Swedish translations for 'sv'", () => {
+      const t = getTranslations("sv");
+      expect(t["nav.dashboard"]).toBe("Översikt");
+    });
+
+    it("returns Simplified Chinese translations for 'zh'", () => {
+      const t = getTranslations("zh");
+      expect(t["nav.dashboard"]).toBe("仪表盘");
+    });
+
+    it("falls back to English for unsupported language", () => {
+      const t = getTranslations("fr");
+      expect(t["nav.dashboard"]).toBe("Dashboard");
+    });
+  });
+
+  describe("placeholder parity", () => {
+    // Translations is typed off en, so a missing key fails the build. Nothing
+    // types the placeholders inside a value, so a locale can keep the key and
+    // silently drop the interpolation the key exists for. Driven off
+    // SUPPORTED_LANGUAGES so a new locale is covered the day it is registered.
+    it.each(translated)("keeps every %s placeholder that en declares", (lang) => {
+      const locale = getTranslations(lang);
+      for (const key of Object.keys(en) as (keyof typeof en)[]) {
+        expect(placeholders(locale[key]), `${lang} ${key}`).toEqual(placeholders(en[key]));
+      }
+    });
+  });
+
+  describe("createTranslateFn", () => {
+    it("returns translated string for the given language", () => {
+      const t = createTranslateFn("id");
+      expect(t("dashboard.title")).toBe("Dasbor");
+    });
+
+    it("falls back to English for unsupported language code", () => {
+      const t = createTranslateFn("xx");
+      expect(t("dashboard.title")).toBe("Dashboard");
+    });
+
+    it("interpolates parameters with {param} syntax", () => {
+      const t = createTranslateFn("en");
+      expect(t("settings.combos", { count: "1,000" })).toBe(
+        "1,000 possible combinations",
+      );
+    });
+
+    it("interpolates multiple parameters", () => {
+      const t = createTranslateFn("en");
+      expect(t("client.confirmDeleteKey", { title: "My Key" })).toBe(
+        'Delete API key "My Key"? This cannot be undone.',
+      );
+    });
+
+    it("treats interpolated values as literal text, not replacement patterns", () => {
+      const t = createTranslateFn("en");
+      // "$`" is a special String.replace pattern (text before the match).
+      // A naive string replacement would splice it in instead of the
+      // literal value.
+      expect(t("client.confirmDeleteKey", { title: "x$`y" })).toBe(
+        'Delete API key "x$`y"? This cannot be undone.',
+      );
+    });
+
+    it("returns the key itself when no translation exists", () => {
+      // Simulate a missing key by casting
+      const t = createTranslateFn("en");
+      const result = t("nonexistent.key" as any);
+      expect(result).toBe("nonexistent.key");
+    });
+
+    it("translates all English keys without gaps", () => {
+      const t = createTranslateFn("en");
+      for (const key of Object.keys(en)) {
+        const val = t(key as any);
+        expect(val).not.toBe(key);
+      }
+    });
+
+    it("every supported language covers all English keys", () => {
+      const enKeys = Object.keys(en);
+      for (const lang of SUPPORTED_LANGUAGES) {
+        const translations = getTranslations(lang);
+        for (const key of enKeys) {
+          expect(translations[key as keyof typeof translations], `Missing '${key}' in '${lang}'`).toBeTruthy();
+        }
+      }
+    });
+  });
+
+  describe("constants", () => {
+    it("has 'en' as default language", () => {
+      expect(DEFAULT_LANGUAGE).toBe("en");
+    });
+
+    it("lists all supported languages", () => {
+      // The exact set, not one containment per language: a locale dropped from
+      // the array used to leave this test green, because its sibling parity
+      // suites iterate the array itself and would simply run one case fewer.
+      expect([...SUPPORTED_LANGUAGES]).toEqual(["en", "id", "sv", "zh"]);
+    });
+  });
+
+  describe("key parity across locales", () => {
+    const enKeys = new Set(flattenKeys(en));
+
+    it.each(translated)("locale %s has the same key set as en", (lang) => {
+      const localeKeys = new Set(flattenKeys(getTranslations(lang)));
+      const missing = [...enKeys].filter((k) => !localeKeys.has(k));
+      const extra = [...localeKeys].filter((k) => !enKeys.has(k));
+      expect({ missing, extra }).toEqual({ missing: [], extra: [] });
+    });
+  });
+
+  describe("language metadata keys", () => {
+    it("each language has a _lang key matching its code", () => {
+      for (const lang of SUPPORTED_LANGUAGES) {
+        const translations = getTranslations(lang);
+        expect(translations["_lang"]).toBe(lang);
+      }
+    });
+
+    it("native language names are the same across all locales", () => {
+      for (const lang of SUPPORTED_LANGUAGES) {
+        const translations = getTranslations(lang);
+        expect(translations["lang.en"]).toBe("English");
+        expect(translations["lang.id"]).toBe("Bahasa Indonesia");
+        expect(translations["lang.sv"]).toBe("Svenska");
+        expect(translations["lang.zh"]).toBe("简体中文");
+      }
+    });
+
+    it("localized language names differ per locale", () => {
+      const en = getTranslations("en");
+      const id = getTranslations("id");
+      const sv = getTranslations("sv");
+      const zh = getTranslations("zh");
+
+      expect(en["langLocal.id"]).toBe("Indonesian");
+      expect(id["langLocal.id"]).toBe("Indonesia");
+      expect(sv["langLocal.id"]).toBe("Indonesiska");
+      expect(zh["langLocal.id"]).toBe("印度尼西亚语");
+
+      expect(en["langLocal.sv"]).toBe("Swedish");
+      expect(id["langLocal.sv"]).toBe("Swedia");
+      expect(sv["langLocal.sv"]).toBe("Svenska");
+      expect(zh["langLocal.sv"]).toBe("瑞典语");
+
+      expect(en["langLocal.zh"]).toBe("Chinese (Simplified)");
+      expect(id["langLocal.zh"]).toBe("Tionghoa (Sederhana)");
+      expect(sv["langLocal.zh"]).toBe("Kinesiska (förenklad)");
+      expect(zh["langLocal.zh"]).toBe("简体中文");
+    });
+  });
+});
+
+describe("documentLang", () => {
+  it("tags the zh table with its script", () => {
+    // Screen readers pick a voice and browsers pick a Han font from <html
+    // lang>. "zh" alone leaves the script to the system default, which can be
+    // Traditional or Japanese glyph forms for Simplified strings.
+    expect(documentLang("zh")).toBe("zh-Hans");
+  });
+
+  it("tags every other language with its code", () => {
+    for (const lang of SUPPORTED_LANGUAGES.filter((l) => l !== "zh")) {
+      expect(documentLang(lang), lang).toBe(lang);
+    }
+  });
+});
